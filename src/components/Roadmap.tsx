@@ -81,60 +81,28 @@ const PHASES: Phase[] = [
 
 const GAP = 32;
 
-/* ═══════════════════════════════════════════════════════════════════
-   INTERACTION TUNING
-   — Draggable is the SOLE owner of the track's `x` transform.
-   — Wheel drives movement through a single gsap.to() tween (the same
-     "snap" system), never via a competing LERP / quickSetter on x.
-   — quickSetter is used ONLY for visual card effects (scale/opacity/
-     rotationY/blur), never for horizontal position.
-   ═══════════════════════════════════════════════════════════════════ */
-
 type Mode = 'idle' | 'drag' | 'wheel' | 'snap';
 type Setter = (value: number | string) => void;
 interface CardSetter { scale: Setter; opacity: Setter; rot: Setter; blur: Setter }
 
-// Drag feel — light, responsive, premium (Apple/Steam/AAA grade).
-const DRAG_EDGE_RESISTANCE = 0.9;
-const DRAG_RESISTANCE = 0.02;
-const DRAG_MINIMUM_MOVEMENT = 3;
-const DRAG_THROW_RESISTANCE = 1200;
-const BOUNDARY_OVERSHOOT = 80; // px of rubber-band past the first/last card
-
-// Wheel feel — heavy, cinematic, ~70% less sensitive than the old LERP.
-const WHEEL_PX_PER_NOTCH = 180; // px of travel per "notch" of wheel input
-const WHEEL_TWEEN_DURATION = 0.55;
-const WHEEL_TWEEN_EASE = 'power3.out';
-
-// Snap — never instant; wait, then settle.
-const SNAP_DELAY = 300; // ms of idle before snapping
-const SNAP_DURATION = 0.9;
-const SNAP_EASE = 'power3.out';
-
 export default function Roadmap() {
   const trackRef = useRef<HTMLDivElement>(null);
   const wrapRef = useRef<HTMLDivElement>(null);
-  const sectionRef = useRef<HTMLElement>(null);
   const [active, setActive] = useState(0);
   const cardEls = useRef<(HTMLDivElement | null)[]>([]);
   const activeRef = useRef(0);
 
-  // Interaction refs — never trigger re-renders during movement.
+  // interaction refs — never trigger re-renders during movement
   const dragRef = useRef<Draggable | null>(null);
+  const xSetterRef = useRef<Setter | null>(null);
   const cardSettersRef = useRef<(CardSetter | null)[]>([]);
+  const targetXRef = useRef(0);
+  const currentXRef = useRef(0);
   const modeRef = useRef<Mode>('idle');
+  const rafRef = useRef<number | null>(null);
   const snapTimerRef = useRef<number | null>(null);
   const snapTweenRef = useRef<gsap.core.Tween | null>(null);
-  const wheelTweenRef = useRef<gsap.core.Tween | null>(null);
   const dimsRef = useRef({ cardW: 0, step: 0, minX: 0, maxX: 0, wrapW: 0 });
-
-  // Wheel-gesture state.
-  const gestureBaseIdxRef = useRef(0);
-  const wheelAccumRef = useRef(0);
-  const inViewRef = useRef(false);
-
-  const getX = () =>
-    trackRef.current ? (gsap.getProperty(trackRef.current, 'x') as number) : 0;
 
   const measure = () => {
     const wrap = wrapRef.current;
@@ -158,15 +126,13 @@ export default function Roadmap() {
     return Math.max(minX, Math.min(maxX, x));
   };
 
-  const clampIdx = (i: number) =>
-    Math.max(0, Math.min(PHASES.length - 1, i));
-
   const nearestIdx = (x: number) => {
     const { step, maxX } = dimsRef.current;
-    return clampIdx(Math.round((maxX - x) / step));
+    const idx = Math.round((maxX - x) / step);
+    return Math.max(0, Math.min(PHASES.length - 1, idx));
   };
 
-  // Visual card update via quickSetters — never touches `x`.
+  // Continuous card update using quickSetters — no gsap.to() per frame.
   const updateCards = (x: number) => {
     const { cardW, step, wrapW } = dimsRef.current;
     const setters = cardSettersRef.current;
@@ -195,7 +161,7 @@ export default function Roadmap() {
     }
   };
 
-  const scheduleSnap = (delay = SNAP_DELAY) => {
+  const scheduleSnap = (delay = 200) => {
     cancelSnap();
     snapTimerRef.current = window.setTimeout(() => {
       snapTimerRef.current = null;
@@ -204,21 +170,12 @@ export default function Roadmap() {
     }, delay);
   };
 
-  // Kill every motion tween acting on `x` so a new gesture starts clean.
-  const killX = () => {
-    snapTweenRef.current?.kill();
-    snapTweenRef.current = null;
-    wheelTweenRef.current?.kill();
-    wheelTweenRef.current = null;
-    dragRef.current?.tween?.kill();
-  };
-
   const startSnap = () => {
     const track = trackRef.current;
     if (!track) return;
-    const idx = nearestIdx(getX());
+    const idx = nearestIdx(currentXRef.current);
     const target = posX(idx);
-    if (Math.abs(target - getX()) < 0.5) {
+    if (Math.abs(target - currentXRef.current) < 0.5) {
       if (activeRef.current !== idx) { activeRef.current = idx; setActive(idx); }
       modeRef.current = 'idle';
       return;
@@ -227,9 +184,12 @@ export default function Roadmap() {
     snapTweenRef.current?.kill();
     snapTweenRef.current = gsap.to(track, {
       x: target,
-      duration: SNAP_DURATION,
-      ease: SNAP_EASE,
-      onUpdate: () => updateCards(getX()),
+      duration: 0.8,
+      ease: 'power3.out',
+      onUpdate: () => {
+        currentXRef.current = gsap.getProperty(track, 'x') as number;
+        updateCards(currentXRef.current);
+      },
       onComplete: () => {
         snapTweenRef.current = null;
         modeRef.current = 'idle';
@@ -244,15 +204,21 @@ export default function Roadmap() {
     if (!track) return;
     const d = dragRef.current;
     if (d?.isDragging) return;
-    killX();
+    d?.tween?.kill();
     cancelSnap();
-    const target = posX(clampIdx(idx));
+    const target = posX(idx);
+    currentXRef.current = gsap.getProperty(track, 'x') as number;
+    targetXRef.current = target;
     modeRef.current = 'snap';
+    snapTweenRef.current?.kill();
     snapTweenRef.current = gsap.to(track, {
       x: target,
-      duration: SNAP_DURATION,
-      ease: SNAP_EASE,
-      onUpdate: () => updateCards(getX()),
+      duration: 0.8,
+      ease: 'power3.out',
+      onUpdate: () => {
+        currentXRef.current = gsap.getProperty(track, 'x') as number;
+        updateCards(currentXRef.current);
+      },
       onComplete: () => {
         snapTweenRef.current = null;
         modeRef.current = 'idle';
@@ -265,12 +231,12 @@ export default function Roadmap() {
   useEffect(() => {
     const wrap = wrapRef.current;
     const track = trackRef.current;
-    const section = sectionRef.current;
     if (!wrap || !track) return;
 
     measure();
 
-    // quickSetters — visual effects only, never horizontal position.
+    // quickSetters — cheapest possible per-frame writes
+    xSetterRef.current = gsap.quickSetter(track, 'x', 'px') as Setter;
     cardSettersRef.current = cardEls.current.map((card) => {
       if (!card) return null;
       return {
@@ -282,132 +248,107 @@ export default function Roadmap() {
     });
 
     const startX = posX(0);
+    targetXRef.current = startX;
+    currentXRef.current = startX;
     gsap.set(track, { x: startX });
     updateCards(startX);
 
-    // Track whether the section is on-screen so we only capture the wheel then.
-    const io = new IntersectionObserver(
-      (entries) => { inViewRef.current = entries[0].isIntersecting; },
-      { threshold: 0.4 },
-    );
-    if (section) io.observe(section);
+    // Single rAF loop for the entire section.
+    const tick = () => {
+      rafRef.current = requestAnimationFrame(tick);
+      const mode = modeRef.current;
+      if (mode === 'drag') {
+        // Draggable owns the transform during drag + inertia throw.
+        currentXRef.current = gsap.getProperty(track, 'x') as number;
+        updateCards(currentXRef.current);
+      } else if (mode === 'wheel') {
+        // Smooth LERP glide toward the wheel target.
+        const cur = currentXRef.current;
+        const tgt = targetXRef.current;
+        const next = cur + (tgt - cur) * 0.1;
+        currentXRef.current = Math.abs(tgt - next) < 0.3 ? tgt : next;
+        xSetterRef.current?.(currentXRef.current);
+        updateCards(currentXRef.current);
+      }
+      // 'snap' is driven by gsap.to(); 'idle' needs no work.
+    };
+    rafRef.current = requestAnimationFrame(tick);
 
-    // ── Draggable: sole owner of `x` during drag + inertia throw ──
+    // Draggable — created once, never recreated.
     const drag = Draggable.create(track, {
       type: 'x',
       inertia: true,
-      edgeResistance: DRAG_EDGE_RESISTANCE,
-      dragResistance: DRAG_RESISTANCE,
-      minimumMovement: DRAG_MINIMUM_MOVEMENT,
-      throwResistance: DRAG_THROW_RESISTANCE,
+      edgeResistance: 0.85,
+      dragResistance: 0.05,
+      minimumMovement: 6,
       allowNativeTouchScrolling: true,
-      bounds: {
-        minX: dimsRef.current.minX - BOUNDARY_OVERSHOOT,
-        maxX: dimsRef.current.maxX + BOUNDARY_OVERSHOOT,
+      bounds: { minX: dimsRef.current.minX - 80, maxX: dimsRef.current.maxX + 80 },
+      onPress: () => {
+        snapTweenRef.current?.kill();
+        snapTweenRef.current = null;
+        cancelSnap();
       },
-      onPress: () => { killX(); cancelSnap(); },
-      onDragStart: () => { modeRef.current = 'drag'; },
-      onDrag: () => { updateCards(getX()); },
-      onThrowUpdate: () => { updateCards(getX()); },
+      onDragStart: () => {
+        modeRef.current = 'drag';
+      },
       onThrowComplete: () => {
         modeRef.current = 'idle';
-        scheduleSnap(SNAP_DELAY);
+        scheduleSnap(200);
       },
       onRelease: () => {
-        // A press without crossing the drag threshold — reschedule a settle.
-        if (modeRef.current !== 'drag') scheduleSnap(SNAP_DELAY);
+        // A click without crossing the drag threshold — reschedule a settle.
+        if (modeRef.current !== 'drag') scheduleSnap(200);
       },
     })[0];
     dragRef.current = drag;
 
-    // ── Wheel: temporarily capture vertical wheel → horizontal travel ──
+    // Smooth momentum wheel — accumulates into a target, LERPs, snaps after idle.
     const onWheel = (e: WheelEvent) => {
-      if (!inViewRef.current) return;
-
-      // Pick the dominant axis (trackpads send both).
-      let d = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
-      if (!d) return;
-
-      // Normalize across wheel types → pixels.
-      if (e.deltaMode === 1) d *= 16;        // line mode
-      else if (e.deltaMode === 2) d *= 100;  // page mode
-
-      const dir = d > 0 ? 1 : -1; // +1 = wheel down = next card
-      const atFirst = activeRef.current <= 0;
-      const atLast = activeRef.current >= PHASES.length - 1;
-
-      // Section lock: at a boundary and pushing beyond → release to the page.
-      if ((atFirst && dir === -1) || (atLast && dir === 1)) return;
-
+      const delta = Math.abs(e.deltaY) >= Math.abs(e.deltaX) ? e.deltaY : e.deltaX;
+      if (!delta) return;
       e.preventDefault();
-
-      const dragInst = dragRef.current;
-      if (dragInst?.isDragging) return; // user is actively holding — ignore wheel
-
-      killX();
-      cancelSnap();
-
-      // New gesture? reset accumulator + base index so we never skip a card.
-      if (modeRef.current !== 'wheel') {
-        wheelAccumRef.current = 0;
-        gestureBaseIdxRef.current = nearestIdx(getX());
+      const d = dragRef.current;
+      if (modeRef.current === 'drag') {
+        if (d?.isDragging) return; // user is actively holding — ignore wheel
+        d?.tween?.kill(); // hijack an ongoing inertia throw
+      }
+      if (modeRef.current === 'snap') {
+        snapTweenRef.current?.kill();
+        snapTweenRef.current = null;
       }
       modeRef.current = 'wheel';
-
-      // Accumulate normalized travel (notches → px), heavy and cinematic.
-      wheelAccumRef.current += (d / 100) * WHEEL_PX_PER_NOTCH;
-
-      // Clamp to one card from the gesture base — never skip multiple cards.
-      const minTarget = posX(clampIdx(gestureBaseIdxRef.current + 1));
-      const maxTarget = posX(clampIdx(gestureBaseIdxRef.current - 1));
-      let target = getX() - wheelAccumRef.current;
-      target = Math.max(minTarget, Math.min(maxTarget, target));
-      target = clampX(target);
-
-      // Single tween owns `x` for the whole wheel gesture.
-      wheelTweenRef.current = gsap.to(track, {
-        x: target,
-        duration: WHEEL_TWEEN_DURATION,
-        ease: WHEEL_TWEEN_EASE,
-        overwrite: 'auto',
-        onUpdate: () => updateCards(getX()),
-        onComplete: () => {
-          wheelTweenRef.current = null;
-          modeRef.current = 'idle';
-          wheelAccumRef.current = 0;
-          scheduleSnap(SNAP_DELAY);
-        },
-      });
-      scheduleSnap(SNAP_DELAY);
+      currentXRef.current = gsap.getProperty(track, 'x') as number;
+      targetXRef.current = clampX(currentXRef.current - delta * 1.5);
+      scheduleSnap(200);
     };
     wrap.addEventListener('wheel', onWheel, { passive: false });
 
-    // ── Resize: re-measure and re-center without recreating Draggable ──
+    // Resize — re-measure and re-center on the active card without recreating Draggable.
     let resizeTimer: number | null = null;
     const onResize = () => {
       if (resizeTimer != null) clearTimeout(resizeTimer);
       resizeTimer = window.setTimeout(() => {
-        killX();
+        snapTweenRef.current?.kill();
+        snapTweenRef.current = null;
+        dragRef.current?.tween?.kill();
         measure();
         const t = posX(activeRef.current);
+        targetXRef.current = t;
+        currentXRef.current = t;
         gsap.set(track, { x: t });
         modeRef.current = 'idle';
-        wheelAccumRef.current = 0;
         updateCards(t);
         if (dragRef.current) {
-          dragRef.current.applyBounds({
-            minX: dimsRef.current.minX - BOUNDARY_OVERSHOOT,
-            maxX: dimsRef.current.maxX + BOUNDARY_OVERSHOOT,
-          });
+          dragRef.current.applyBounds({ minX: dimsRef.current.minX - 80, maxX: dimsRef.current.maxX + 80 });
         }
       }, 150);
     };
     window.addEventListener('resize', onResize);
 
     return () => {
-      io.disconnect();
+      if (rafRef.current != null) cancelAnimationFrame(rafRef.current);
       cancelSnap();
-      killX();
+      snapTweenRef.current?.kill();
       wrap.removeEventListener('wheel', onWheel);
       window.removeEventListener('resize', onResize);
       drag.kill();
@@ -416,7 +357,7 @@ export default function Roadmap() {
   }, []);
 
   return (
-    <section ref={sectionRef} id="roadmap" className="relative overflow-hidden py-24">
+    <section id="roadmap" className="relative overflow-hidden py-24">
       <RoadmapBackground />
 
       <div className="relative z-10 mb-12 text-center reveal-glitch">
