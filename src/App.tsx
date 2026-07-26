@@ -37,7 +37,6 @@ export default function App() {
         <Tokenomics />
         <CyberpsychoMeter />
         <Roadmap />
-        <Quotes />
         <HowToBuy />
         <FAQ />
       </main>
