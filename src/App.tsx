@@ -9,7 +9,6 @@ import CrewDatabase from './components/CrewDatabase';
 import Tokenomics from './components/Tokenomics';
 import CyberpsychoMeter from './components/CyberpsychoMeter';
 import Roadmap from './components/Roadmap';
-import Quotes from './components/Quotes';
 import HowToBuy from './components/HowToBuy';
 import FAQ from './components/FAQ';
 import Footer from './components/Footer';
